@@ -10,7 +10,8 @@ from app.calc import add, health, subtract
 
 class TestAdd:
     def test_add_integers(self):
-        assert add(2, 3) == 5
+        # DELIBERATE FAILURE: wrong expected value to demonstrate triage workflow
+        assert add(2, 3) == 999  # <-- intentionally broken
 
     def test_add_floats(self):
         assert add(1.5, 2.5) == pytest.approx(4.0)
