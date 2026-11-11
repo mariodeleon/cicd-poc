@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"   # stable backend path; works with all setuptools>=40
 
 [project]
 name = "cicd-poc"
