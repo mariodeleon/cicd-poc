@@ -1,0 +1,260 @@
+# .github/workflows/ci-cd.yml
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# GITHUB ACTIONS — COMPLETE CI/CD LIFECYCLE DEMO
+# Learning PoC: designed to be read alongside README.md
+# Every non-obvious line carries a comment explaining WHY it exists.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI / CD Pipeline   # Human-readable name shown in the Actions UI
+
+# ─── TRIGGERS ────────────────────────────────────────────────────────────────
+# `on:` defines WHEN this workflow runs.
+# We trigger on two events:
+#   - push to main     → runs the full pipeline (CI + build + deploy)
+#   - pull_request     → runs CI only (lint + test); deploy jobs are gated by
+#                        `if: github.event_name == 'push'` so they are skipped
+on:
+  push:
+    branches: [main]        # only the main branch, not every branch push
+  pull_request:
+    branches: [main]        # PRs targeting main get CI checks before merge
+
+# ─── CONCURRENCY ─────────────────────────────────────────────────────────────
+# Prevents two runs for the same branch from racing each other.
+# If a new push lands while CI is still running for the previous commit,
+# the older run is cancelled — saving runner minutes on superseded work.
+#
+# NOTE: We use a SEPARATE concurrency group for production deploys (see below)
+# so that a new push does NOT cancel an in-flight production deployment.
+concurrency:
+  group: ci-${{ github.ref }}   # one slot per branch/ref for the CI jobs
+  cancel-in-progress: true
+
+# ─── JOBS ────────────────────────────────────────────────────────────────────
+# Each `job` runs on its own fresh virtual machine (runner).
+# Jobs run IN PARALLEL by default; use `needs:` to create a dependency chain.
+jobs:
+
+  # ── JOB 1: LINT ─────────────────────────────────────────────────────────────
+  # Stage: Continuous Integration (CI)
+  # Purpose: catch style errors and obvious code problems before running tests.
+  # Tool: ruff — a fast Python linter (replaces flake8, pyflakes, isort, etc.)
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest    # GitHub-hosted Ubuntu runner — free for public repos
+
+    steps:
+      # STEP: Check out the repository code onto the runner.
+      # `actions/checkout@v5` is the official action; always pin to a major version.
+      # Without this step, the runner has no code to work with.
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # STEP: Install Python on the runner.
+      # `cache: pip` tells the action to cache pip's download cache between runs
+      # so repeated runs don't re-download the same packages.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # STEP: Install only the dev dependencies (lint, test, build tools).
+      # We don't install the app itself for linting — just the linter.
+      - name: Install linter
+        run: pip install ruff
+
+      # STEP: Run ruff.
+      # `--output-format=github` formats errors as GitHub annotations so they
+      # appear inline in the PR diff view, not just in the raw log.
+      - name: Run ruff lint
+        run: ruff check --output-format=github .
+
+  # ── JOB 2: TEST ─────────────────────────────────────────────────────────────
+  # Stage: Continuous Integration (CI)
+  # Purpose: run the unit-test suite and fail fast if any test breaks.
+  # Runs in PARALLEL with lint (no `needs:` — both start immediately).
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Install all dev dependencies (includes pytest and the app's test deps).
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Run pytest.
+      # `-v` gives verbose output (test names, not just dots).
+      # `--tb=short` shows a compact traceback on failure — easier to triage.
+      - name: Run pytest
+        run: pytest -v --tb=short
+
+  # ── JOB 3: BUILD ────────────────────────────────────────────────────────────
+  # Stage: Build + Continuous Delivery
+  # Purpose: produce a versioned, installable Python wheel artifact.
+  # `needs: [lint, test]` — only runs if BOTH CI jobs passed.
+  # Only runs on push events (not PRs) via the `if:` guard.
+  build:
+    name: Build wheel artifact
+    runs-on: ubuntu-latest
+    needs: [lint, test]    # dependency: both CI jobs must succeed first
+    # Only build on real pushes to main, not on PR events.
+    # On a PR, github.event_name == 'pull_request' so this job is skipped.
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build tool
+        run: pip install build
+
+      # `python -m build` reads pyproject.toml and produces:
+      #   dist/<name>-<version>-py3-none-any.whl   (wheel — installable package)
+      #   dist/<name>-<version>.tar.gz             (source distribution)
+      - name: Build wheel
+        run: python -m build
+
+      # Upload the dist/ directory as a workflow artifact.
+      #
+      # IMPORTANT — artifact v4 rules (v3 was shut down 2025-01-30):
+      #   1. Artifacts are IMMUTABLE — you cannot upload twice with the same name
+      #      in one run.  We use `dist-${{ github.run_id }}` to make it unique.
+      #   2. `download-artifact@v4` requires the same name to download.
+      #   3. Always use @v4 or later — @v3 hard-fails on github.com.
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.run_id }}    # unique per run (immutability rule)
+          path: dist/
+          retention-days: 7                  # auto-deleted after 7 days
+
+  # ── JOB 4: DEPLOY TO STAGING ────────────────────────────────────────────────
+  # Stage: Staging Deployment
+  # Purpose: deploy the built artifact to the staging environment and run
+  #          a smoke test to confirm the build is functional.
+  #
+  # `environment: staging` links this job to a GitHub Environment named
+  # "staging". If the environment has protection rules (branch restrictions,
+  # wait timer), they are enforced here. The run's sidebar shows deployment
+  # history per environment.
+  deploy-staging:
+    name: Deploy → Staging
+    runs-on: ubuntu-latest
+    needs: build               # only runs after the artifact is built
+    if: github.event_name == 'push'
+    environment:
+      name: staging
+      url: https://github.com/mariodeleon/cicd-poc/actions  # shown in UI after deploy
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Download the artifact produced by the `build` job.
+      # `name:` must match the upload name exactly.
+      # `path: dist/` extracts the artifact contents into ./dist on this runner.
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ github.run_id }}
+          path: dist/
+
+      # Verify the artifact contains what we expect.
+      - name: Verify artifact contents
+        run: |
+          echo "=== Artifact contents ==="
+          ls -lh dist/
+          echo "=== Wheel file ==="
+          ls dist/*.whl
+
+      # Simulate staging deployment.
+      # In a real pipeline this would be: scp to a server, kubectl apply, etc.
+      # Here we install the wheel into the runner's Python to prove it's valid.
+      - name: Simulate staging deploy (install wheel)
+        run: |
+          pip install dist/*.whl
+          echo "Package installed successfully — staging deploy simulated."
+
+      # Run the health check script against the installed package.
+      # Exit code 0 = pass, 1 = fail (causes this step and the job to fail).
+      - name: Run health check (staging)
+        run: python scripts/healthcheck.py
+
+  # ── JOB 5: DEPLOY TO PRODUCTION ─────────────────────────────────────────────
+  # Stage: Production Deployment (with approval gate)
+  # Purpose: deploy to production — but ONLY after a required reviewer approves.
+  #
+  # `environment: production` links to the "production" GitHub Environment.
+  # Because that environment has Required Reviewers configured, this job PAUSES
+  # before its first step and waits for a listed reviewer to click "Approve"
+  # in the GitHub Actions UI (or via gh cli).
+  #
+  # This is the GATE that separates staging (automatic) from production (manual).
+  # The YAML side is just `environment: production` — the protection rule lives
+  # in the repository Settings → Environments → production → Required reviewers.
+  deploy-production:
+    name: Deploy → Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging       # only runs after staging passed
+    if: github.event_name == 'push'
+    environment:
+      name: production
+      url: https://github.com/mariodeleon/cicd-poc/actions
+
+    # Separate concurrency group for production.
+    # WHY: the top-level `concurrency` block cancels in-progress runs when a
+    # new push arrives.  We do NOT want to cancel a production deployment
+    # mid-flight just because someone pushed another commit.  This override
+    # makes production deploys non-cancellable by new pushes.
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ github.run_id }}
+          path: dist/
+
+      - name: Simulate production deploy (install wheel)
+        run: |
+          pip install dist/*.whl
+          echo "Package installed — production deploy simulated."
+
+      # Same health check as staging — confirms the build is healthy in prod too.
+      - name: Run health check (production)
+        run: python scripts/healthcheck.py
+
+      # Record deployment metadata.
+      # In a real pipeline this might update a CMDB, post a Slack/Teams message,
+      # or write to a deployment log.
+      - name: Record deployment
+        run: |
+          echo "================================================"
+          echo "  PRODUCTION DEPLOYMENT SUCCESSFUL"
+          echo "  Artifact : dist-${{ github.run_id }}"
+          echo "  Commit   : ${{ github.sha }}"
+          echo "  Actor    : ${{ github.actor }}"
+          echo "  Time     : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "================================================"

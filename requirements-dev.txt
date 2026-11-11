@@ -1,0 +1,4 @@
+# Development dependencies — installed in CI and locally for linting/testing/building.
+ruff>=0.4.0
+pytest>=8.0
+build>=1.2

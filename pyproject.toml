@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "cicd-poc"
+version = "0.1.0"
+description = "GitHub Actions CI/CD proof-of-concept — a tiny Python app used to demonstrate a complete pipeline lifecycle."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 99
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]   # pycodestyle errors, pyflakes, isort
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]             # lets pytest find `from app.calc import ...` without install
