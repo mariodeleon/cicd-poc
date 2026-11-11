@@ -36,72 +36,114 @@ These are the core GitHub Actions building blocks. Each entry maps to where it a
 | **Concurrency** | Prevents multiple runs of the same workflow/job from overlapping. `cancel-in-progress: true` cancels the older run when a new one starts. | Top-level `concurrency:` (CI) and per-job override for production (non-cancellable) |
 | **Context** | Built-in variables provided by GitHub at runtime: `github.sha`, `github.actor`, `github.ref`, `github.event_name`, etc. | Used in the `record deployment` step and `if:` conditions |
 
+### How the concepts nest inside each other
+
+```mermaid
+graph TD
+    REPO["📁 Repository"]
+    WF["📄 Workflow\n.github/workflows/ci-cd.yml"]
+    EVT["⚡ Event / Trigger\non: push · pull_request"]
+    JOB["⚙️ Job\nlint · test · build · deploy-*"]
+    STEP["▶️ Step\n- name: Run pytest\n  run: pytest -v"]
+    ACT["📦 Action\nactions/checkout@v5\nactions/setup-python@v6"]
+    RUN["🖥️ Runner\nubuntu-latest\n(GitHub-hosted VM)"]
+    ENV["🌍 Environment\nstaging · production\n(protection rules)"]
+    ART["🗜️ Artifact\ndist-<run_id>.whl\n(shared between jobs)"]
+    SEC["🔒 Secret\nSETTINGS → Secrets\n${{ secrets.MY_KEY }}"]
+
+    REPO --> WF
+    EVT -->|"fires"| WF
+    WF --> JOB
+    JOB -->|"runs on"| RUN
+    JOB --> STEP
+    STEP -->|"uses"| ACT
+    JOB -->|"links to"| ENV
+    JOB -->|"uploads/downloads"| ART
+    ENV -->|"injects"| SEC
+
+    style REPO fill:#f0f0f0,stroke:#999
+    style WF fill:#dbeafe,stroke:#3b82f6
+    style EVT fill:#fef9c3,stroke:#ca8a04
+    style JOB fill:#dcfce7,stroke:#16a34a
+    style STEP fill:#f0fdf4,stroke:#86efac
+    style ACT fill:#ede9fe,stroke:#7c3aed
+    style RUN fill:#fff7ed,stroke:#ea580c
+    style ENV fill:#fce7f3,stroke:#db2777
+    style ART fill:#e0f2fe,stroke:#0284c7
+    style SEC fill:#fef2f2,stroke:#dc2626
+```
+
 ---
 
 ## 2. Lifecycle Diagram
 
-This shows the complete journey of a code change from commit to production.
+### 2.1 — The full journey: from code change to production
 
-```
-                        ┌─────────────────────────────────────────────┐
-  developer             │         GitHub Actions Runner                │
-  ──────────            │                                              │
-                        │  on: pull_request (PR opened)                │
-  git push ──────────►  │  ┌──────────┐   ┌──────────┐               │
-  (feature branch)      │  │  lint    │   │  test    │  ← CI stage    │
-                        │  └──────────┘   └──────────┘               │
-                        │    (parallel)                                │
-                        │       │ both pass → PR gets green checks ✓  │
-                        └───────┼─────────────────────────────────────┘
-                                │
-  git merge ──────────►         │  on: push (main)
-  (to main)                     │
-                                ▼
-                        ┌──────────────┐
-                        │   lint       │  CI stage
-                        │   test       │  (parallel)
-                        └──────┬───────┘
-                               │ both pass
-                               ▼
-                        ┌──────────────┐
-                        │   build      │  Build + Delivery stage
-                        │  (wheel →    │  produces dist-<run_id>.whl
-                        │   artifact)  │  uploaded to workflow artifacts
-                        └──────┬───────┘
-                               │
-                               ▼
-                        ┌──────────────┐
-                        │ deploy-      │  Staging stage (automatic)
-                        │ staging      │  installs wheel, runs healthcheck
-                        │ environment  │
-                        └──────┬───────┘
-                               │ staging healthcheck passed
-                               ▼
-                        ┌──────────────┐
-                        │ ⏸ APPROVAL  │  ← Required Reviewer gate
-                        │   GATE       │    (configured in Environment settings)
-                        └──────┬───────┘
-                               │ reviewer clicks "Approve" in GitHub UI
-                               ▼
-                        ┌──────────────┐
-                        │ deploy-      │  Production stage
-                        │ production   │  installs wheel, runs healthcheck,
-                        │ environment  │  records deployment metadata
-                        └──────────────┘
-                               │
-                               ▼
-                         Deployment history recorded in
-                         repo → Deployments → production
+```mermaid
+flowchart TD
+    DEV(["👨‍💻 Developer\npushes code"])
+
+    subgraph PR_EVENT["on: pull_request — CI only"]
+        direction LR
+        L1["⚙️ lint\nruff check"]
+        T1["⚙️ test\npytest"]
+    end
+
+    subgraph PUSH_EVENT["on: push to main — full pipeline"]
+        direction TB
+        L2["⚙️ lint\nruff check"]
+        T2["⚙️ test\npytest"]
+        B["📦 build\npython -m build\n→ upload artifact"]
+        DS["🚀 deploy-staging\ndownload artifact\ninstall wheel\nhealthcheck ✓"]
+        GATE{"⏸ Approval\nGate\nRequired Reviewer"}
+        DP["🏭 deploy-production\ndownload artifact\ninstall wheel\nhealthcheck ✓\nrecord deployment"]
+        HIST[("📋 Deployment\nHistory\nrepo → Deployments")]
+    end
+
+    GREEN["✅ PR checks\ngreen — safe to merge"]
+    MERGE(["🔀 Merge to main"])
+
+    DEV -->|"git push\nfeature branch"| PR_EVENT
+    L1 & T1 --> GREEN
+    GREEN --> MERGE
+    MERGE -->|"triggers"| PUSH_EVENT
+
+    L2 & T2 -->|"both pass"| B
+    B -->|"artifact stored"| DS
+    DS -->|"staging passed"| GATE
+    GATE -->|"reviewer approves"| DP
+    DP --> HIST
+
+    style GATE fill:#fef9c3,stroke:#ca8a04,color:#000
+    style GREEN fill:#dcfce7,stroke:#16a34a
+    style HIST fill:#e0f2fe,stroke:#0284c7
 ```
 
-**CI/CD stage mapping:**
+### 2.2 — CI/CD stage definitions
 
-| Stage | Definition | Jobs in this pipeline |
-|---|---|---|
-| **Continuous Integration (CI)** | Automatically validate every code change | `lint`, `test` |
-| **Build** | Produce a versioned, reproducible artifact | `build` |
-| **Continuous Delivery (CD)** | Make the artifact ready and deployable at any time | `build` (artifact upload) + `deploy-staging` |
-| **Continuous Deployment** | Automatically deploy to staging; gate production | `deploy-staging` (auto), `deploy-production` (gated) |
+```mermaid
+graph LR
+    subgraph CI["Continuous Integration"]
+        L["lint\nruff check"]
+        T["test\npytest"]
+    end
+    subgraph BUILD["Build"]
+        B["build\npython -m build\nwheel artifact"]
+    end
+    subgraph CD["Continuous Delivery"]
+        DS["deploy-staging\nauto on push to main"]
+    end
+    subgraph CDP["Continuous Deployment\n(Gated)"]
+        DP["deploy-production\nrequires approval"]
+    end
+
+    CI --> BUILD --> CD --> CDP
+
+    style CI fill:#dbeafe,stroke:#3b82f6
+    style BUILD fill:#dcfce7,stroke:#16a34a
+    style CD fill:#fff7ed,stroke:#ea580c
+    style CDP fill:#fce7f3,stroke:#db2777
+```
 
 ---
 
@@ -121,7 +163,39 @@ on:
     branches: [main]
 ```
 
-**Why:** The `name:` is what appears in the GitHub Actions UI — make it human-readable. The `on:` block controls what events fire the workflow. By restricting to `branches: [main]` we avoid running the pipeline on every experimental branch push, keeping runner usage low. Pull requests to `main` get CI (lint + test) so reviewers can see results before merging. Pushes to `main` (i.e. after merge) get the full pipeline including build and deploy.
+**Why:** The `name:` is what appears in the GitHub Actions UI — make it human-readable. The `on:` block controls what events fire the workflow. By restricting to `branches: [main]` we avoid running the pipeline on every experimental branch push, keeping runner usage low.
+
+#### Event routing — what runs on each event type
+
+```mermaid
+flowchart LR
+    PR(["pull_request\nto main"])
+    PUSH(["push\nto main"])
+
+    subgraph PR_JOBS["Jobs that run"]
+        L_PR["lint ✓"]
+        T_PR["test ✓"]
+        B_PR["build ✗ skipped\nif: push only"]
+        DS_PR["deploy-staging ✗ skipped"]
+        DP_PR["deploy-production ✗ skipped"]
+    end
+
+    subgraph PUSH_JOBS["Jobs that run"]
+        L_P["lint ✓"]
+        T_P["test ✓"]
+        B_P["build ✓"]
+        DS_P["deploy-staging ✓"]
+        DP_P["deploy-production ✓\n(after approval)"]
+    end
+
+    PR --> PR_JOBS
+    PUSH --> PUSH_JOBS
+
+    style B_PR fill:#f3f4f6,stroke:#9ca3af,color:#6b7280
+    style DS_PR fill:#f3f4f6,stroke:#9ca3af,color:#6b7280
+    style DP_PR fill:#f3f4f6,stroke:#9ca3af,color:#6b7280
+    style DP_P fill:#fef9c3,stroke:#ca8a04
+```
 
 ### 3.2 — Concurrency
 
@@ -131,17 +205,30 @@ concurrency:
   cancel-in-progress: true
 ```
 
-**Why:** Without this, pushing two commits quickly would queue two full pipeline runs that both do the same work. `cancel-in-progress: true` cancels the first run when the second starts — saving time and runner minutes. The `group` is scoped per-ref (branch), so `main` and `feature/x` can run concurrently without cancelling each other.
+**Why:** Without this, pushing two commits quickly would queue two full pipeline runs that do the same work. `cancel-in-progress: true` cancels the older run when the second starts — saving runner minutes.
 
-Note the production deploy job *overrides* this with its own concurrency block and `cancel-in-progress: false` — you never want to interrupt a production deployment midway through because a new commit arrived.
+#### How concurrency groups work
+
+```mermaid
+sequenceDiagram
+    participant Dev as 👨‍💻 Developer
+    participant GH as GitHub Actions
+    participant Run1 as Run A (old commit)
+    participant Run2 as Run B (new commit)
+
+    Dev->>GH: git push (commit A)
+    GH->>Run1: start run — group: ci-refs/heads/main
+    Note over Run1: lint + test running...
+
+    Dev->>GH: git push (commit B) — new push arrives
+    GH->>Run1: ❌ cancel (cancel-in-progress: true)
+    GH->>Run2: start run — group: ci-refs/heads/main
+    Note over Run2: lint + test + build + deploy...
+
+    Note over GH: Production deploy uses a SEPARATE group<br/>with cancel-in-progress: false<br/>→ never cancelled mid-deployment
+```
 
 ### 3.3 — The `needs:` Chain
-
-```
-lint ────────┐
-             ├──► build ──► deploy-staging ──► deploy-production
-test ────────┘
-```
 
 ```yaml
 build:
@@ -154,7 +241,53 @@ deploy-production:
   needs: deploy-staging
 ```
 
-**Why:** `needs:` creates a *dependency graph*. GitHub runs independent jobs in parallel (lint + test run at the same time), then waits for all dependencies before starting the next stage. If `lint` fails, `test` still runs (they're parallel) but `build` is skipped — there's no point building broken code.
+**Why:** `needs:` creates a *dependency graph*. GitHub runs independent jobs in parallel (lint + test run at the same time), then waits for all dependencies before starting the next stage.
+
+#### Job dependency graph
+
+```mermaid
+graph LR
+    L["⚙️ lint"]
+    T["⚙️ test"]
+    B["📦 build"]
+    DS["🚀 deploy-staging"]
+    DP["🏭 deploy-production"]
+
+    L -->|"must pass"| B
+    T -->|"must pass"| B
+    B -->|"artifact ready"| DS
+    DS -->|"staging passed\n+ approval"| DP
+
+    style L fill:#dcfce7,stroke:#16a34a
+    style T fill:#dcfce7,stroke:#16a34a
+    style B fill:#dbeafe,stroke:#3b82f6
+    style DS fill:#fff7ed,stroke:#ea580c
+    style DP fill:#fce7f3,stroke:#db2777
+```
+
+#### What happens when a job fails
+
+```mermaid
+flowchart TD
+    L["lint ✓"]
+    T["test ✗ FAILED"]
+    B["build\n⬜ skipped\n(needs test)"]
+    DS["deploy-staging\n⬜ skipped\n(needs build)"]
+    DP["deploy-production\n⬜ skipped\n(needs staging)"]
+    ERR["❌ Run marked FAILED\nonly failed jobs shown red\ndownstream shown grey"]
+
+    L --> T
+    T --> B
+    B --> DS
+    DS --> DP
+    T --> ERR
+
+    style T fill:#fef2f2,stroke:#dc2626
+    style B fill:#f3f4f6,stroke:#9ca3af,color:#6b7280
+    style DS fill:#f3f4f6,stroke:#9ca3af,color:#6b7280
+    style DP fill:#f3f4f6,stroke:#9ca3af,color:#6b7280
+    style ERR fill:#fef2f2,stroke:#dc2626
+```
 
 ### 3.4 — The `if:` Guard (Deploy Only on Push)
 
@@ -163,7 +296,7 @@ build:
   if: github.event_name == 'push'
 ```
 
-**Why:** On a pull request, `github.event_name == 'pull_request'`, so `build`, `deploy-staging`, and `deploy-production` are all **skipped** (shown as grey in the UI, not failed). This is intentional: PRs should only run CI checks, not deploy anything. This guard ensures the workflow file can handle both PR and push events without needing two separate workflow files.
+**Why:** On a pull request `github.event_name == 'pull_request'`, so `build`, `deploy-staging`, and `deploy-production` are all **skipped** (shown grey, not failed). PRs should only run CI checks — not deploy anything. One workflow file handles both event types cleanly.
 
 ### 3.5 — Artifact Upload/Download (v4)
 
@@ -182,10 +315,27 @@ build:
     path: dist/
 ```
 
-**Why v4 and unique names:**
-- `upload-artifact@v3` and earlier were **permanently shut down on 2025-01-30**. Any workflow still referencing `@v3` will hard-fail with a clear error. Always use `@v4`.
-- v4 artifacts are **immutable** — you cannot upload twice with the same name in one run (it errors). Appending `${{ github.run_id }}` guarantees uniqueness.
-- Both upload and download must use the exact same `name:`. If you change one, change both.
+#### How the artifact flows between jobs
+
+```mermaid
+sequenceDiagram
+    participant B as 📦 build job<br/>(Runner A)
+    participant GH as GitHub<br/>Artifact Store
+    participant DS as 🚀 deploy-staging<br/>(Runner B)
+    participant DP as 🏭 deploy-production<br/>(Runner C)
+
+    B->>B: python -m build → dist/*.whl
+    B->>GH: upload-artifact@v4<br/>name: dist-43080463925
+    Note over GH: stored for 7 days<br/>immutable — cannot upload twice
+
+    GH-->>DS: download-artifact@v4<br/>name: dist-43080463925
+    DS->>DS: pip install dist/*.whl<br/>healthcheck.py ✓
+
+    GH-->>DP: download-artifact@v4<br/>name: dist-43080463925
+    DP->>DP: pip install dist/*.whl<br/>healthcheck.py ✓<br/>record deployment
+```
+
+> **Critical:** `upload-artifact@v3` and earlier were **permanently shut down on 2025-01-30** and hard-fail. Always use `@v4`. Artifact names are immutable per run — use `${{ github.run_id }}` to guarantee uniqueness.
 
 ### 3.6 — Environments
 
@@ -193,20 +343,35 @@ build:
 deploy-staging:
   environment:
     name: staging
-    url: https://github.com/mariodeleon/cicd-poc/actions
 
 deploy-production:
   environment:
-    name: production
-    url: https://github.com/mariodeleon/cicd-poc/actions
+    name: production    # ← triggers approval gate
 ```
 
-**Why:** `environment:` links a job to a named deployment target. This does several things:
-1. **Activates protection rules** — if `production` has Required Reviewers, the job pauses for approval before its first step runs.
-2. **Creates a deployment record** — visible under repo → Deployments. Each run adds an entry with timestamp, actor, and status.
-3. **Shows the `url:` in the UI** — a clickable link next to the job result.
+#### What `environment:` activates
 
-The protection rules themselves are configured in Settings, not in YAML (see Section 5).
+```mermaid
+flowchart LR
+    YAML["environment:\n  name: production"]
+
+    subgraph Effects["What this declaration does"]
+        R["🔒 Activates protection rules\n(required reviewers,\nwait timer, branch restriction)"]
+        D["📋 Creates deployment record\nrepo → Deployments\n(timestamp, actor, status)"]
+        U["🔗 Shows url: link\nin the run UI"]
+        S["🔑 Scopes secrets\nenv-level secrets only\navailable to this job"]
+    end
+
+    YAML --> Effects
+
+    style YAML fill:#fef9c3,stroke:#ca8a04
+    style R fill:#fce7f3,stroke:#db2777
+    style D fill:#e0f2fe,stroke:#0284c7
+    style U fill:#f0fdf4,stroke:#16a34a
+    style S fill:#fef2f2,stroke:#dc2626
+```
+
+The protection rules themselves are configured in **Settings → Environments**, not in YAML (see Section 5).
 
 ---
 
@@ -215,63 +380,179 @@ The protection rules themselves are configured in Settings, not in YAML (see Sec
 ### Adding a new job
 
 1. Add a new top-level key under `jobs:`.
-2. Give it a `runs-on:`, `steps:`, and optionally `needs:` (its prerequisites).
-3. Add it to any other jobs' `needs:` lists if they should wait for it.
+2. Give it `runs-on:`, `steps:`, and optionally `needs:` (its prerequisites).
+3. Add it to any downstream jobs' `needs:` lists if they should wait for it.
+
+#### Example: inserting a security scan between CI and build
+
+```mermaid
+graph LR
+    L["lint"]
+    T["test"]
+    SEC["🛡️ security-scan\n(new job)\nneeds: lint, test"]
+    B["build\nneeds: lint, test, security-scan"]
+    DS["deploy-staging"]
+    DP["deploy-production"]
+
+    L --> SEC
+    T --> SEC
+    L --> B
+    T --> B
+    SEC --> B
+    B --> DS
+    DS --> DP
+
+    style SEC fill:#ede9fe,stroke:#7c3aed
+```
 
 ```yaml
 jobs:
   security-scan:
     name: Security scan
     runs-on: ubuntu-latest
-    needs: [lint, test]        # runs after CI but before build
+    needs: [lint, test]
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v5
       - run: pip install bandit && bandit -r src/
 ```
 
-### Adding a new step
-
-Steps are just `- name: ... run: ...` or `- name: ... uses: ...` inside a job's `steps:` list. They execute sequentially and share the same runner filesystem.
-
 ### Trigger options (common patterns)
 
-```yaml
-on:
-  push:
-    branches: [main]           # pushes to main only
-  pull_request:
-    branches: [main]           # PRs targeting main
-  workflow_dispatch:           # manual trigger (adds a "Run workflow" button in UI)
-  schedule:
-    - cron: '0 6 * * 1'       # every Monday at 06:00 UTC
+```mermaid
+mindmap
+  root((on:))
+    push
+      branches: main
+      branches: main, develop
+      paths: src/**
+    pull_request
+      branches: main
+      types: opened, synchronize
+    workflow_dispatch
+      Manual "Run workflow" button in UI
+      Accepts input parameters
+    schedule
+      cron: 0 6 * * 1
+      Every Monday 06:00 UTC
+    workflow_call
+      Called by another workflow
+      Reusable workflow pattern
+```
+
+### Build → Deploy artifact hand-off (the pattern)
+
+```mermaid
+flowchart LR
+    subgraph BUILD["build job"]
+        PB["python -m build"]
+        UA["upload-artifact@v4\nname: dist-RUNID\npath: dist/\nretention: 7d"]
+        PB --> UA
+    end
+
+    subgraph STORE["GitHub Artifact Store\n(scoped to this run)"]
+        ART[("dist-RUNID\n*.whl + *.tar.gz\nIMMUTABLE")]
+    end
+
+    subgraph STAGING["deploy-staging job"]
+        DA1["download-artifact@v4\nname: dist-RUNID\npath: dist/"]
+        INST1["pip install dist/*.whl\nhealthcheck.py"]
+        DA1 --> INST1
+    end
+
+    subgraph PROD["deploy-production job"]
+        DA2["download-artifact@v4\nname: dist-RUNID\npath: dist/"]
+        INST2["pip install dist/*.whl\nhealthcheck.py"]
+        DA2 --> INST2
+    end
+
+    UA -->|"stores"| ART
+    ART -->|"fetched by"| DA1
+    ART -->|"fetched by"| DA2
+
+    style ART fill:#e0f2fe,stroke:#0284c7
+    style STORE fill:#f0f9ff,stroke:#bae6fd
 ```
 
 ### Action version pinning rationale
 
-Always pin to a major version tag (`@v4`, `@v5`). Never use `@main` or `@latest` in production workflows — they can break silently when the action author pushes a breaking change. For supply-chain security hardening (after the PoC), pin to the full SHA of the action commit instead of a tag.
+```mermaid
+graph TD
+    A["actions/upload-artifact"] -->|"@v3"| V3["❌ DEAD\nShut down 2025-01-30\nHard-fails instantly"]
+    A -->|"@v4"| V4["✅ Current stable\nUse this"]
+    A -->|"@main"| MAIN["⚠️ Dangerous\nBreaks silently\non author push"]
+    A -->|"@SHA (full hash)"| SHA["🔒 Most secure\nFor production\nPrevents supply-chain attacks"]
 
-### Build → Deploy artifact hand-off (the pattern)
-
-The pattern used here — upload in `build`, download in `deploy-*` — is the standard way to share files between jobs. Key rules:
-- The artifact name must be consistent (`dist-${{ github.run_id }}`).
-- Upload once per name per run (immutability).
-- Add `retention-days:` to control storage cost.
+    style V3 fill:#fef2f2,stroke:#dc2626
+    style V4 fill:#dcfce7,stroke:#16a34a
+    style MAIN fill:#fef9c3,stroke:#ca8a04
+    style SHA fill:#ede9fe,stroke:#7c3aed
+```
 
 ---
 
 ## 5. How to Manage Environments and Gates
 
-### Creating environments (UI)
+### Environment anatomy
 
-1. Go to **repo → Settings → Environments → New environment**
-2. Create `staging` (no protection rules for now)
-3. Create `production` and configure:
-   - **Required reviewers** → add `mariodeleon` (or any collaborator)
-   - **Deployment branches** → restrict to `main` only
-   - Optional: **Wait timer** (e.g. 5 minutes after staging before production can run)
+```mermaid
+graph TD
+    ENV["🌍 Environment\n(staging or production)"]
 
-### Creating environments via `gh` CLI (what was done for this repo)
+    subgraph PROT["Protection Rules\n(Settings → Environments)"]
+        RR["👥 Required Reviewers\nUp to 6 users/teams\nmust approve before job runs"]
+        WT["⏱️ Wait Timer\nDelay N minutes\nafter trigger, before job runs"]
+        BR["🌿 Deployment Branches\nOnly allowed branches\ncan deploy here"]
+    end
+
+    subgraph EFFECTS["What happens at runtime"]
+        PAUSE["Job PAUSES before step 1\nRun shows yellow 'Waiting' badge\nEmail sent to reviewers"]
+        APPROVE["Reviewer clicks\n'Review deployments → Approve'\nor: gh run review ID --approve"]
+        RESUME["Job resumes\nsteps execute normally"]
+        RECORD["Deployment record created\nrepo → Deployments\ntimestamp + actor + status"]
+    end
+
+    ENV --> PROT
+    RR -->|"triggers"| PAUSE
+    PAUSE --> APPROVE
+    APPROVE --> RESUME
+    RESUME --> RECORD
+
+    style PAUSE fill:#fef9c3,stroke:#ca8a04
+    style APPROVE fill:#dcfce7,stroke:#16a34a
+    style RECORD fill:#e0f2fe,stroke:#0284c7
+```
+
+### Approval gate — step-by-step sequence
+
+```mermaid
+sequenceDiagram
+    participant GH as GitHub Actions
+    participant ENV as production Environment
+    participant Email as 📧 Email
+    participant Rev as 👤 Reviewer<br/>(mariodeleon)
+    participant Job as 🏭 deploy-production job
+
+    GH->>ENV: deploy-production reached production environment
+    ENV->>GH: protection rule: required_reviewers active
+    GH->>Job: ⏸ PAUSE before first step
+    GH->>Email: notify required reviewers
+
+    Note over GH: Run shows status: "waiting"<br/>gh run list --status waiting
+
+    Rev->>GH: clicks "Review deployments → Approve"
+    Note over Rev: or: gh run review RUN_ID --approve
+
+    GH->>Job: ▶️ RESUME — execute steps
+    Job->>Job: download artifact
+    Job->>Job: install wheel
+    Job->>Job: healthcheck ✓
+    Job->>Job: record deployment
+    Job->>GH: ✅ success
+    GH->>ENV: deployment record created
+```
+
+### Creating environments via `gh` CLI
 
 ```bash
 # Create environments
@@ -280,56 +561,65 @@ gh api repos/mariodeleon/cicd-poc/environments/production -X PUT -f ""
 
 # Add required reviewer (get your user ID first)
 user_id=$(gh api users/mariodeleon --jq .id)
-gh api repos/mariodeleon/cicd-poc/environments/production \
-  -X PUT \
-  --field "reviewers[][type]=User" \
-  --field "reviewers[][id]=$user_id"
-```
-
-### How the approval gate works (step by step)
-
-1. A push to `main` triggers the pipeline.
-2. `lint` + `test` run → `build` runs → `deploy-staging` runs and passes.
-3. `deploy-production` starts — but **before its first step**, GitHub sees the `environment: production` with Required Reviewers.
-4. The run **pauses**. An email is sent to the required reviewers. The run UI shows a yellow "Waiting" badge with a **Review deployments** button.
-5. A reviewer clicks **Review deployments → Approve and deploy**.
-6. The production job resumes and completes.
-
-### How to approve via `gh` CLI (without opening the browser)
-
-```bash
-# List pending approvals
-gh run list --repo mariodeleon/cicd-poc --status waiting
-
-# Get the run ID, then approve
-gh run review <run-id> --approve --repo mariodeleon/cicd-poc
+echo '{"wait_timer":0,"reviewers":[{"type":"User","id":'"$user_id"'}]}' | \
+  gh api repos/mariodeleon/cicd-poc/environments/production -X PUT --input -
 ```
 
 ### Managing secrets
 
-Secrets are stored encrypted at rest. They are **never** shown in logs (GitHub masks them automatically). To add one:
+```mermaid
+flowchart LR
+    subgraph STORE["GitHub Secret Store\n(encrypted at rest)"]
+        RS["📁 Repository secrets\nSettings → Secrets → Actions\nAvailable to ALL jobs"]
+        ES["📁 Environment secrets\nSettings → Environments → production\nAvailable ONLY to jobs\ntargeting that environment"]
+    end
 
-```bash
-# Via gh CLI
-gh secret set DEPLOY_SSH_KEY --body "$(cat ~/.ssh/id_cicd)" --repo mariodeleon/cicd-poc
+    subgraph YAML["In workflow YAML"]
+        REF["${{ secrets.DEPLOY_SSH_KEY }}\n${{ secrets.PROD_API_TOKEN }}"]
+    end
 
-# Reference in workflow:
-# run: ssh user@host -i <(echo "${{ secrets.DEPLOY_SSH_KEY }}") ...
+    subgraph LOG["In runner logs"]
+        MASK["*** (masked automatically)\nnever visible even with --log"]
+    end
+
+    RS -->|"injected as env var"| REF
+    ES -->|"injected as env var"| REF
+    REF -->|"if printed"| MASK
+
+    style MASK fill:#fef2f2,stroke:#dc2626
+    style ES fill:#fce7f3,stroke:#db2777
 ```
 
-**Never** hardcode credentials in workflow YAML. Even in private repos — the workflow file is code and must be treated accordingly.
+> **Never** hardcode credentials in workflow YAML. Even in private repos — the workflow file is code and must be treated accordingly.
 
 ---
 
 ## 6. How to Troubleshoot
 
-### Reading the Actions UI
+### Triage decision tree
 
-1. Go to **repo → Actions tab** → select a workflow → select a run.
-2. The run page shows the **job graph**: boxes for each job, colored by result (green = pass, red = fail, grey = skipped, yellow = waiting for approval).
-3. Click a job → click a step to expand its log output.
-4. Artifacts produced by the run appear in the **Artifacts** section at the bottom.
-5. Deployments per environment appear in **repo → Deployments** (left sidebar).
+```mermaid
+flowchart TD
+    START(["❌ Pipeline failed\nWhat do I do?"])
+
+    START --> Q1{"Which job\nturned red?"}
+
+    Q1 -->|"lint"| LINT["ruff check output\nshows the offending line\nCheck: pyproject.toml ruff config\nFix: formatting or unused imports"]
+    Q1 -->|"test"| TEST["pytest output\nshows FAILED test name\nand AssertionError details\nFix: the function or the test"]
+    Q1 -->|"build"| BUILD["Check: pyproject.toml\nbuild-backend correct?\nsetuptools.build_meta ✓\nsetutools.backends.legacy ✗"]
+    Q1 -->|"deploy-staging\nor deploy-production"| DEPLOY{"What does\nthe step say?"}
+
+    DEPLOY -->|"artifact not found"| ART["name: mismatch between\nupload and download\nMust match exactly"]
+    DEPLOY -->|"healthcheck failed"| HC["App is broken at runtime\nFix the code, not the pipeline"]
+    DEPLOY -->|"permission error"| PERM["Token missing scope\nor environment protection\nnot configured correctly"]
+    DEPLOY -->|"stuck on 'waiting'"| WAIT["No reviewer approved yet\ngh run list --status waiting\ngh run review ID --approve"]
+
+    Q1 -->|"build/deploy are grey\nnot red"| SKIP["Working as intended:\n- On a PR: if: push only\n- Upstream job failed:\n  skipped automatically"]
+
+    style START fill:#fef2f2,stroke:#dc2626
+    style SKIP fill:#f3f4f6,stroke:#9ca3af
+    style WAIT fill:#fef9c3,stroke:#ca8a04
+```
 
 ### `gh` CLI triage cheat-sheet
 
@@ -362,45 +652,44 @@ gh run rerun <run-id> --failed
 gh run download <run-id>
 ```
 
-### Worked failure example
+### Worked failure example — full triage cycle
 
-**Scenario:** a test is deliberately broken (see the Operations section in the walkthrough) to demonstrate the triage cycle.
+```mermaid
+sequenceDiagram
+    participant Dev as 👨‍💻 Developer
+    participant GH as GitHub Actions
+    participant CLI as gh CLI
 
-**What you see in the UI:** the `test` job turns red. Because `build` has `needs: [lint, test]`, it is automatically *skipped* (grey). Both deploy jobs are also skipped. The run is marked failed.
+    Dev->>GH: git push (broken test: assert 5 == 999)
+    GH->>GH: lint ✓ → test ✗ FAILED
+    GH->>GH: build ⬜ skipped · staging ⬜ skipped · prod ⬜ skipped
+    GH-->>Dev: ❌ run failed
 
-**Triage with CLI:**
+    Dev->>CLI: gh run list --status failure
+    CLI-->>Dev: run ID: 43080864272
 
-```bash
-# Step 1: find the failed run ID
-gh run list --repo mariodeleon/cicd-poc --status failure --limit 3
+    Dev->>CLI: gh run view 43080864272 --log-failed
+    CLI-->>Dev: "FAILED tests/test_calc.py::TestAdd::test_add_integers\nAssertionError: assert 5 == 999"
 
-# Step 2: read only the failed step logs
-gh run view <run-id> --log-failed
-# Output will show: FAILED tests/test_calc.py::TestAdd::test_add_integers
-# AssertionError: assert 999 == 5
+    Note over Dev: Root cause identified in seconds.<br/>No browser needed.
 
-# Step 3: fix the code, commit, push
-git add src/app/calc.py
-git commit -m "fix: restore correct add() implementation"
-git push
-
-# Step 4: watch the recovery run
-gh run watch   # picks up the newest run automatically
+    Dev->>Dev: fix test: assert add(2,3) == 5
+    Dev->>GH: git push (recovery commit)
+    GH->>GH: lint ✓ → test ✓ → build ✓ → staging ✓ → prod ✓
+    GH-->>Dev: ✅ run succeeded
 ```
-
-**Recovery evidence:** the new run shows all jobs green. The deployment history shows a new successful entry in `production`.
 
 ### Common failure signatures
 
 | Symptom in logs | Root cause | Fix |
 |---|---|---|
-| `Error: This request has been automatically failed because it uses a deprecated version of actions/upload-artifact` | Using `@v3` or earlier | Change to `@v4` |
-| `An artifact with this name already exists` | Uploading twice to the same artifact name | Use `name: dist-${{ github.run_id }}` or add `overwrite: true` |
-| `Resource not accessible by integration` | Workflow is trying to write to a resource (environments, packages) but the token lacks the scope | Add the required permission to `permissions:` block or re-create the PAT with the right scope |
+| `This request has been automatically failed because it uses a deprecated version of actions/upload-artifact` | Using `@v3` or earlier — **shut down 2025-01-30** | Change to `@v4` |
+| `An artifact with this name already exists` | Uploading twice with the same name in one run (v4 immutability) | Use `name: dist-${{ github.run_id }}` or add `overwrite: true` |
+| `Resource not accessible by integration` | Token lacks required scope (e.g. `workflow`, `read:org`) | Re-authenticate with correct scopes |
 | `Context access might be invalid: secrets.MY_SECRET` | Secret name typo or secret not created in Settings | Check Settings → Secrets → Actions |
-| Deploy job shown as grey/skipped on a PR | Working as intended — `if: github.event_name == 'push'` skips deploy on PRs | No action needed |
-| Deploy job runs but health check fails | App is broken — the deploy intentionally surfaces this | Fix the code, re-run |
-| `Deploy → Production` stuck on "Waiting" indefinitely | No required reviewer has approved | Click **Review deployments** in the run UI, or use `gh run review <id> --approve` |
+| Deploy jobs shown grey on a PR | Working as intended — `if: github.event_name == 'push'` | No action needed |
+| Deploy job runs but health check fails | App is broken at runtime | Fix the code, not the pipeline |
+| `Deploy → Production` stuck on "Waiting" | No required reviewer has approved | Click **Review deployments** in the run UI, or `gh run review <id> --approve` |
 
 ---
 
@@ -409,7 +698,7 @@ gh run watch   # picks up the newest run automatically
 ### Prerequisites
 
 - `git` and `gh` CLI installed
-- Authenticated: `gh auth login --hostname github.com`
+- Authenticated: `gh auth login --hostname github.com --scopes "repo,workflow,read:org"`
 
 ### Full walkthrough
 
@@ -468,23 +757,53 @@ gh run view <run-id> --log-failed   # see the assertion error
 
 ## Repository Structure
 
-```
-repo_cicd-poc/
-├── .github/
-│   └── workflows/
-│       └── ci-cd.yml          # The pipeline — read alongside this README
-├── src/
-│   └── app/
-│       ├── __init__.py
-│       └── calc.py            # Tiny Python module: add, subtract, health
-├── tests/
-│   ├── __init__.py
-│   └── test_calc.py           # pytest unit tests
-├── scripts/
-│   └── healthcheck.py         # Post-deploy smoke test
-├── pyproject.toml             # Project metadata + build config
-├── requirements-dev.txt       # Dev dependencies: ruff, pytest, build
-└── README.md                  # This file
+```mermaid
+graph TD
+    ROOT["📁 cicd-poc/"]
+
+    GH["📁 .github/"]
+    WF["📁 workflows/"]
+    CICD["📄 ci-cd.yml\nThe pipeline\n5 jobs, heavily commented"]
+
+    SRC["📁 src/"]
+    APP["📁 app/"]
+    INIT["📄 __init__.py\nMakes app a package"]
+    CALC["📄 calc.py\nadd() subtract() health()\nThe app logic under test"]
+
+    TESTS["📁 tests/"]
+    TINIT["📄 __init__.py"]
+    TCALC["📄 test_calc.py\n7 pytest unit tests"]
+
+    SCRIPTS["📁 scripts/"]
+    HC["📄 healthcheck.py\nPost-deploy smoke test\nExit 0=pass 1=fail"]
+
+    PYPROJ["📄 pyproject.toml\nBuild config + ruff + pytest"]
+    REQS["📄 requirements-dev.txt\nruff pytest build"]
+    README["📄 README.md\nThis file — the learning guide"]
+    GI["📄 .gitignore"]
+
+    ROOT --> GH
+    ROOT --> SRC
+    ROOT --> TESTS
+    ROOT --> SCRIPTS
+    ROOT --> PYPROJ
+    ROOT --> REQS
+    ROOT --> README
+    ROOT --> GI
+
+    GH --> WF --> CICD
+    SRC --> APP
+    APP --> INIT
+    APP --> CALC
+    TESTS --> TINIT
+    TESTS --> TCALC
+    SCRIPTS --> HC
+
+    style CICD fill:#dbeafe,stroke:#3b82f6
+    style CALC fill:#dcfce7,stroke:#16a34a
+    style TCALC fill:#dcfce7,stroke:#16a34a
+    style HC fill:#fff7ed,stroke:#ea580c
+    style README fill:#ede9fe,stroke:#7c3aed
 ```
 
 ---
